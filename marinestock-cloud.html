@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<meta name="theme-color" content="#0a1628"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<title>MarineStock Cloud</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=Barlow:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDocs, writeBatch, getDoc } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+// ── FIREBASE CONFIG ──────────────────────────────────────────────────
+// Paste your Firebase config here after setting up your project.
+// See the Setup Guide in the app (⚙️ Settings → ☁️ Cloud Setup).
+const FIREBASE_CONFIG = {
+  apiKey: "",
+  authDomain: "",
+  projectId: "",
+  storageBucket: "",
+  messagingSenderId: "",
+  appId: ""
+};
+
+// ── GLOBALS ──────────────────────────────────────────────────────────
+let db_firestore = null;
+let unsubscribers = [];
+let firebaseReady = false;
+
+window._firebaseInit = async function() {
+  const cfg = FIREBASE_CONFIG;
+  const missing = !cfg.apiKey || !cfg.projectId;
+  if (missing) {
+    updateSyncStatus('not-configured');
+    return;
+  }
+  try {
+    updateSyncStatus('connecting');
+    const app = initializeApp(cfg);
+    db_firestore = getFirestore(app);
+    firebaseReady = true;
+    startRealtimeSync();
+    updateSyncStatus('connected');
+    toast('☁️ Connected to cloud!');
+  } catch(e) {
+    console.error('Firebase init error:', e);
+    updateSyncStatus('error');
+    toast('⚠️ Cloud connection failed. Check your config.');
+  }
+};
+
+// ── REALTIME SYNC ─────────────────────────────────────────────────────
+window._startRealtimeSync = function() { startRealtimeSync(); };
+
+function startRealtimeSync() {
+  if (!db_firestore) return;
+  unsubscribers.forEach(u => u());
+  unsubscribers = [];
+
+  // Listen to items
+  const itemsUnsub = onSnapshot(collection(db_firestore, 'items'), snap => {
+    db.items = [];
+    snap.forEach(d => db.items.push({ id: d.id, ...d.data() }));
+    renderItems('lube'); renderItems('chem'); renderItems('grease');
+    updateSmallOilsBanner();
+    updateExportSections();
+  }, err => { console.error('Items sync error:', err); updateSyncStatus('error'); });
+
+  // Listen to transactions
+  const txUnsub = onSnapshot(collection(db_firestore, 'transactions'), snap => {
+    db.transactions = [];
+    snap.forEach(d => db.transactions.push({ id: d.id, ...d.data() }));
+    db.transactions.sort((a,b) => new Date(b.date) - new Date(a.date));
+    renderTxLog();
+  }, err => console.error('TX sync error:', err));
+
+  // Listen to settings
+  const settingsUnsub = onSnapshot(doc(db_firestore, 'meta', 'settings'), snap => {
+    if (snap.exists()) {
+      db.settings = { ...db.settings, ...snap.data() };
+      applySettings();
+    }
+  }, err => console.error('Settings sync error:', err));
+
+  // Listen to history
+  const histUnsub = onSnapshot(collection(db_firestore, 'history'), snap => {
+    db.history = [];
+    snap.forEach(d => db.history.push({ id: d.id, ...d.data() }));
+    db.history.sort((a,b) => new Date(b.date) - new Date(a.date));
+    renderHistory();
+  }, err => console.error('History sync error:', err));
+
+  unsubscribers = [itemsUnsub, txUnsub, settingsUnsub, histUnsub];
+  updateSyncStatus('connected');
+}
+
+// ── CLOUD WRITE FUNCTIONS ─────────────────────────────────────────────
+window._cloudSaveItem = async function(item) {
+  if (!db_firestore) return;
+  try {
+    await setDoc(doc(db_firestore, 'items', item.id), item);
+  } catch(e) { console.error('Save item error:', e); toast('⚠️ Cloud save failed'); }
+};
+
+window._cloudDeleteItem = async function(id) {
+  if (!db_firestore) return;
+  try {
+    await deleteDoc(doc(db_firestore, 'items', id));
+  } catch(e) { console.error('Delete item error:', e); toast('⚠️ Cloud delete failed'); }
+};
+
+window._cloudSaveTx = async function(tx) {
+  if (!db_firestore) return;
+  try {
+    const batch = writeBatch(db_firestore);
+    batch.set(doc(db_firestore, 'transactions', tx.id), tx);
+    // Also update item qty
+    const item = db.items.find(i => i.id === tx.itemId);
+    if (item) batch.set(doc(db_firestore, 'items', item.id), item);
+    await batch.commit();
+  } catch(e) { console.error('Save TX error:', e); toast('⚠️ Cloud sync failed'); }
+};
+
+window._cloudSaveSettings = async function(settings) {
+  if (!db_firestore) return;
+  try {
+    await setDoc(doc(db_firestore, 'meta', 'settings'), settings);
+  } catch(e) { console.error('Save settings error:', e); }
+};
+
+window._cloudSaveSnapshot = async function(snap) {
+  if (!db_firestore) return;
+  try {
+    await setDoc(doc(db_firestore, 'history', snap.key), snap);
+  } catch(e) { console.error('Save snapshot error:', e); toast('⚠️ Cloud snapshot failed'); }
+};
+
+window._isFirebaseReady = function() { return firebaseReady; };
+
+// Init on load
+window.addEventListener('load', () => { window._firebaseInit(); });
+</script>
+<style>
+:root{
+  --navy:#0a1628;--navy2:#0f2040;--navy3:#162d52;--steel:#1e3a5f;
+  --accent:#e8a020;--accent2:#f0b840;--teal:#00c2b8;
+  --danger:#e84040;--safe:#30c070;--purple:#9b6dff;
+  --text:#d8e4f0;--text2:#8aa8c8;
+  --border:rgba(255,255,255,0.08);--card:rgba(255,255,255,0.04);
+  --lube:#00c2b8;--chem:#e8a020;--grease:#9b6dff;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;background:var(--navy);color:var(--text);font-family:'Barlow',sans-serif;overflow:hidden;}
+#app{display:flex;flex-direction:column;height:100vh;height:100dvh;}
+
+/* HEADER */
+#header{background:var(--navy2);border-bottom:1px solid var(--border);padding:10px 16px;flex-shrink:0;}
+.header-top{display:flex;align-items:center;justify-content:space-between;}
+.logo{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800;letter-spacing:2px;color:var(--accent);text-transform:uppercase;}
+.logo span{color:var(--teal);}
+.vessel-name{font-size:11px;color:var(--text2);letter-spacing:1px;text-transform:uppercase;margin-top:1px;}
+.header-actions{display:flex;gap:8px;}
+
+/* SYNC STATUS BADGE */
+.sync-badge{display:inline-flex;align-items:center;gap:5px;border-radius:20px;padding:3px 10px;font-size:10px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;border:1px solid transparent;margin-top:4px;transition:all .3s;}
+.sync-badge.connected{background:rgba(48,192,112,0.15);color:var(--safe);border-color:rgba(48,192,112,0.3);}
+.sync-badge.connecting{background:rgba(232,160,32,0.15);color:var(--accent);border-color:rgba(232,160,32,0.3);}
+.sync-badge.not-configured{background:rgba(232,64,64,0.1);color:var(--danger);border-color:rgba(232,64,64,0.2);cursor:pointer;}
+.sync-badge.error{background:rgba(232,64,64,0.15);color:var(--danger);border-color:rgba(232,64,64,0.3);}
+.sync-dot{width:6px;height:6px;border-radius:50%;background:currentColor;}
+.sync-dot.pulse{animation:pulse 1.5s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.3;}}
+
+/* TABS */
+#tabs{display:flex;background:var(--navy2);border-bottom:2px solid var(--border);flex-shrink:0;overflow-x:auto;}
+#tabs::-webkit-scrollbar{display:none;}
+.tab{flex:1;min-width:58px;padding:10px 4px;text-align:center;font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;cursor:pointer;color:var(--text2);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .2s;white-space:nowrap;}
+.tab.active.lube{color:var(--lube);border-color:var(--lube);}
+.tab.active.chem{color:var(--chem);border-color:var(--chem);}
+.tab.active.grease{color:var(--grease);border-color:var(--grease);}
+.tab.active.txlog{color:var(--accent);border-color:var(--accent);}
+.tab.active.hist{color:var(--teal);border-color:var(--teal);}
+.tab:not(.active):hover{color:var(--text);}
+
+/* PAGES */
+#pages{flex:1;overflow:hidden;position:relative;}
+.page{position:absolute;inset:0;overflow-y:auto;display:none;padding:12px;}
+.page.active{display:block;}
+
+/* SEARCH */
+.search-bar{display:flex;gap:8px;margin-bottom:12px;}
+.search-bar input{flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 14px;color:var(--text);font-size:14px;font-family:'Barlow',sans-serif;outline:none;}
+.search-bar input:focus{border-color:rgba(255,255,255,0.2);}
+.search-bar input::placeholder{color:var(--text2);}
+
+/* SMALL OILS BANNER */
+.small-oils-banner{background:rgba(0,194,184,0.08);border:1px solid rgba(0,194,184,0.25);border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.small-oils-label{font-size:12px;color:var(--teal);text-transform:uppercase;letter-spacing:1px;font-weight:600;}
+.small-oils-total{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800;color:var(--teal);}
+.small-oils-sub{font-size:10px;color:var(--text2);}
+
+/* STATS */
+.stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;text-align:center;}
+.stat-val{font-family:'Barlow Condensed',sans-serif;font-size:24px;font-weight:800;}
+.stat-val.low{color:var(--danger);}
+.stat-label{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin-top:2px;}
+
+/* ITEM CARDS */
+.items-list{display:flex;flex-direction:column;gap:8px;}
+.item-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;position:relative;overflow:hidden;}
+.item-card.low-stock{border-color:rgba(232,64,64,0.4);background:rgba(232,64,64,0.05);}
+.item-card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;}
+.item-card.lube::before{background:var(--lube);}
+.item-card.chem::before{background:var(--chem);}
+.item-card.grease::before{background:var(--grease);}
+.item-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;}
+.item-name-wrap{flex:1;}
+.item-name{font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700;line-height:1.2;}
+.small-oil-badge{display:inline-flex;align-items:center;gap:3px;background:rgba(0,194,184,0.15);color:var(--teal);border-radius:4px;padding:1px 6px;font-size:10px;font-weight:600;margin-left:6px;vertical-align:middle;}
+.item-actions{display:flex;gap:6px;flex-shrink:0;}
+.btn-icon{background:rgba(255,255,255,0.06);border:1px solid var(--border);border-radius:6px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px;transition:all .15s;}
+.btn-icon:hover{background:rgba(255,255,255,0.12);}
+.btn-icon.danger:hover{background:rgba(232,64,64,0.2);border-color:rgba(232,64,64,0.4);}
+.item-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.tag{font-size:11px;padding:2px 8px;border-radius:20px;background:rgba(255,255,255,0.06);color:var(--text2);display:flex;align-items:center;gap:4px;}
+.tag.location{color:var(--accent2);}
+.item-qty-row{display:flex;align-items:center;justify-content:space-between;margin-top:10px;}
+.qty-display{display:flex;align-items:baseline;gap:4px;}
+.qty-num{font-family:'Barlow Condensed',sans-serif;font-size:28px;font-weight:800;line-height:1;}
+.qty-unit{font-size:12px;color:var(--text2);}
+.qty-min{font-size:11px;color:var(--text2);}
+.qty-min.warn{color:var(--danger);}
+.qty-bar-wrap{height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin-top:6px;overflow:hidden;}
+.qty-bar{height:100%;border-radius:2px;transition:width .3s;}
+.qty-controls{display:flex;align-items:center;gap:6px;}
+.qty-btn{background:rgba(255,255,255,0.08);border:1px solid var(--border);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px;font-weight:700;color:var(--text);transition:all .15s;user-select:none;white-space:nowrap;font-family:'Barlow Condensed',sans-serif;}
+.qty-btn.add-btn{color:var(--safe);border-color:rgba(48,192,112,0.3);}
+.qty-btn.add-btn:hover{background:rgba(48,192,112,0.15);}
+.qty-btn.ded-btn{color:var(--danger);border-color:rgba(232,64,64,0.3);}
+.qty-btn.ded-btn:hover{background:rgba(232,64,64,0.15);}
+
+/* FAB */
+#fab{position:fixed;bottom:24px;right:20px;width:54px;height:54px;border-radius:50%;background:var(--accent);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:26px;color:var(--navy);box-shadow:0 4px 20px rgba(232,160,32,0.4);transition:transform .2s;z-index:100;}
+#fab:hover{transform:scale(1.08);}
+
+/* MODALS */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:200;display:none;align-items:flex-end;justify-content:center;}
+.modal-bg.open{display:flex;}
+.modal-bg.center{align-items:center;}
+.modal{background:var(--navy2);border:1px solid var(--border);border-radius:18px 18px 0 0;width:100%;max-width:600px;padding:20px 20px 32px;max-height:92vh;overflow-y:auto;}
+.modal.centered{border-radius:18px;max-width:360px;width:92%;}
+.modal-handle{width:40px;height:4px;background:rgba(255,255,255,0.2);border-radius:2px;margin:0 auto 16px;}
+.modal-title{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800;letter-spacing:1px;margin-bottom:16px;}
+.form-group{margin-bottom:14px;}
+.form-label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2);margin-bottom:5px;display:block;}
+.form-input{width:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:15px;font-family:'Barlow',sans-serif;outline:none;}
+.form-input:focus{border-color:rgba(255,255,255,0.25);}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.type-toggle{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+.type-btn{flex:1;padding:9px 4px;text-align:center;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:12px;transition:all .2s;color:var(--text2);}
+.type-btn.active.lube{background:rgba(0,194,184,0.2);color:var(--lube);}
+.type-btn.active.chem{background:rgba(232,160,32,0.2);color:var(--chem);}
+.type-btn.active.grease{background:rgba(155,109,255,0.2);color:var(--grease);}
+.modal-actions{display:flex;gap:10px;margin-top:20px;}
+.btn{flex:1;padding:12px;border-radius:8px;font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border:none;transition:all .2s;}
+.btn-primary{background:var(--accent);color:var(--navy);}
+.btn-secondary{background:rgba(255,255,255,0.07);color:var(--text);border:1px solid var(--border);}
+.btn-danger-full{background:rgba(232,64,64,0.15);color:var(--danger);border:1px solid rgba(232,64,64,0.3);}
+.btn-cloud{background:rgba(0,194,184,0.15);color:var(--teal);border:1px solid rgba(0,194,184,0.3);}
+
+/* CHECKBOX */
+.checkbox-row{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;cursor:pointer;margin-bottom:14px;}
+.checkbox-row input[type=checkbox]{width:18px;height:18px;accent-color:var(--teal);cursor:pointer;flex-shrink:0;}
+.checkbox-row label{font-size:13px;color:var(--text);cursor:pointer;line-height:1.3;}
+
+/* EXPORT CHECKBOXES */
+.export-check-grid{display:flex;flex-direction:column;gap:8px;margin-bottom:16px;}
+.export-check-row{display:flex;align-items:center;gap:12px;padding:11px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:background .15s;}
+.export-check-row:hover{background:rgba(255,255,255,0.06);}
+.export-check-row input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent);cursor:pointer;flex-shrink:0;}
+.export-check-icon{font-size:20px;flex-shrink:0;}
+.export-check-label{font-size:14px;font-weight:500;}
+.export-check-sub{font-size:11px;color:var(--text2);margin-top:1px;}
+
+/* TX LOG */
+.txlog-filter{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;}
+.filter-btn{padding:5px 12px;border-radius:20px;font-size:12px;font-family:'Barlow Condensed',sans-serif;font-weight:700;border:1px solid var(--border);background:var(--card);color:var(--text2);cursor:pointer;transition:all .15s;}
+.filter-btn.active{background:rgba(255,255,255,0.1);color:var(--text);border-color:rgba(255,255,255,0.2);}
+.filter-btn.add-f.active{background:rgba(48,192,112,0.15);color:var(--safe);border-color:rgba(48,192,112,0.3);}
+.filter-btn.ded-f.active{background:rgba(232,64,64,0.15);color:var(--danger);border-color:rgba(232,64,64,0.3);}
+.tx-entry{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:11px 14px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start;}
+.tx-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;margin-top:1px;}
+.tx-icon.add{background:rgba(48,192,112,0.15);}
+.tx-icon.deduct{background:rgba(232,64,64,0.15);}
+.tx-body{flex:1;min-width:0;}
+.tx-name{font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tx-remarks{font-size:12px;color:var(--text2);margin-top:2px;}
+.tx-meta{font-size:10px;color:var(--text2);margin-top:4px;}
+.tx-right{text-align:right;flex-shrink:0;}
+.tx-qty{font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:800;}
+.tx-qty.add{color:var(--safe);}
+.tx-qty.deduct{color:var(--danger);}
+.tx-after{font-size:10px;color:var(--text2);margin-top:2px;}
+
+/* HISTORY */
+.history-month{margin-bottom:16px;}
+.month-header{font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border);}
+.history-table{width:100%;border-collapse:collapse;font-size:12px;}
+.history-table th{text-align:left;color:var(--text2);font-weight:500;padding:4px 6px 8px;font-size:10px;text-transform:uppercase;letter-spacing:1px;}
+.history-table td{padding:5px 6px;border-bottom:1px solid var(--border);}
+.history-table tr:last-child td{border-bottom:none;}
+.ch-pos{color:var(--safe);}.ch-neg{color:var(--danger);}
+
+/* SETTINGS */
+.settings-section{margin-bottom:20px;}
+.settings-title{font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text2);margin-bottom:10px;}
+.settings-card{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.settings-row{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);}
+.settings-row:last-child{border-bottom:none;}
+.settings-row-label{font-size:14px;}
+.settings-row-sub{font-size:11px;color:var(--text2);margin-top:2px;}
+.settings-row input{background:transparent;border:none;color:var(--text);font-size:14px;text-align:right;outline:none;font-family:'Barlow',sans-serif;width:160px;}
+
+/* TX MODAL */
+.tx-type-row{display:flex;gap:10px;margin-bottom:14px;}
+.tx-type-btn{flex:1;padding:12px;border-radius:8px;text-align:center;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:700;letter-spacing:1px;border:1px solid var(--border);background:var(--card);color:var(--text2);transition:all .2s;}
+.tx-type-btn.active.add{background:rgba(48,192,112,0.15);color:var(--safe);border-color:rgba(48,192,112,0.4);}
+.tx-type-btn.active.deduct{background:rgba(232,64,64,0.15);color:var(--danger);border-color:rgba(232,64,64,0.4);}
+input[type=date].form-input{color-scheme:dark;cursor:pointer;}
+
+/* PIN MODAL */
+.pin-display{display:flex;justify-content:center;gap:12px;margin:20px 0;}
+.pin-dot{width:18px;height:18px;border-radius:50%;background:rgba(255,255,255,0.15);border:2px solid rgba(255,255,255,0.2);transition:all .15s;}
+.pin-dot.filled{background:var(--accent);border-color:var(--accent);}
+.pin-dot.error{background:var(--danger);border-color:var(--danger);}
+.pin-keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 auto;max-width:260px;}
+.pin-key{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;text-align:center;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:700;transition:all .15s;user-select:none;}
+.pin-key:hover{background:rgba(255,255,255,0.1);}
+.pin-key:active{transform:scale(0.94);}
+.pin-key.del{font-size:18px;color:var(--text2);}
+.pin-key.empty{background:transparent;border-color:transparent;cursor:default;}
+.pin-subtitle{text-align:center;font-size:12px;color:var(--text2);margin-bottom:4px;}
+.pin-item-name{text-align:center;font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;color:var(--danger);margin-bottom:16px;}
+
+/* CLOUD SETUP MODAL */
+.setup-step{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:10px;}
+.setup-step-num{font-family:'Barlow Condensed',sans-serif;font-size:11px;font-weight:700;letter-spacing:1px;color:var(--accent);text-transform:uppercase;margin-bottom:4px;}
+.setup-step-title{font-size:14px;font-weight:600;margin-bottom:4px;}
+.setup-step-desc{font-size:12px;color:var(--text2);line-height:1.5;}
+.setup-step a{color:var(--teal);text-decoration:none;}
+.setup-step a:hover{text-decoration:underline;}
+.config-textarea{width:100%;background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--teal);font-size:11px;font-family:monospace;resize:vertical;min-height:160px;outline:none;line-height:1.5;}
+.config-textarea:focus{border-color:rgba(0,194,184,0.4);}
+
+/* EMPTY */
+.empty-state{text-align:center;padding:48px 20px;color:var(--text2);}
+.empty-icon{font-size:48px;margin-bottom:12px;opacity:0.5;}
+.empty-text{font-size:14px;}
+
+/* TOAST */
+#toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--steel);color:var(--text);padding:10px 20px;border-radius:20px;font-size:13px;opacity:0;transition:all .3s;z-index:400;white-space:nowrap;pointer-events:none;}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:2px;}
+select.form-input option{background:var(--navy2);}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <div class="header-top">
+      <div>
+        <div class="logo">Marine<span>Stock</span> <span style="font-size:11px;color:var(--teal);font-weight:600;">☁ CLOUD</span></div>
+        <div class="vessel-name" id="headerVessel">— Vessel —</div>
+      </div>
+      <div class="header-actions">
+        <button class="btn-icon" onclick="openExportModal()" title="Export PDF">📄</button>
+        <button class="btn-icon" onclick="showTab('settings')" title="Settings">⚙️</button>
+      </div>
+    </div>
+    <div class="sync-badge not-configured" id="syncBadge" onclick="openCloudSetup()">
+      <div class="sync-dot"></div>
+      <span id="syncText">Not Connected — Tap to Setup</span>
+    </div>
+  </div>
+
+  <div id="tabs">
+    <div class="tab active lube" id="tab-lube" onclick="showTab('lube')">🛢 Lube</div>
+    <div class="tab chem" id="tab-chem" onclick="showTab('chem')">⚗️ Chem</div>
+    <div class="tab grease" id="tab-grease" onclick="showTab('grease')">🟣 Grease</div>
+    <div class="tab txlog" id="tab-txlog" onclick="showTab('txlog')">📋 Log</div>
+    <div class="tab hist" id="tab-history" onclick="showTab('history')">📊 History</div>
+  </div>
+
+  <div id="pages">
+    <div class="page active" id="page-lube">
+      <div class="stats-row" id="stats-lube"></div>
+      <div class="small-oils-banner">
+        <div><div class="small-oils-label">🛢 Small Oils Total</div><div class="small-oils-sub">Items tagged as Small Oil</div></div>
+        <div style="text-align:right;">
+          <div class="small-oils-total" id="small-oils-total">0 L</div>
+          <div class="small-oils-sub" id="small-oils-count">0 items</div>
+        </div>
+      </div>
+      <div class="search-bar"><input type="text" placeholder="Search lube oil..." id="search-lube" oninput="renderItems('lube')"/></div>
+      <div class="items-list" id="list-lube"></div>
+    </div>
+    <div class="page" id="page-chem">
+      <div class="stats-row" id="stats-chem"></div>
+      <div class="search-bar"><input type="text" placeholder="Search chemicals..." id="search-chem" oninput="renderItems('chem')"/></div>
+      <div class="items-list" id="list-chem"></div>
+    </div>
+    <div class="page" id="page-grease">
+      <div class="stats-row" id="stats-grease"></div>
+      <div class="search-bar"><input type="text" placeholder="Search grease..." id="search-grease" oninput="renderItems('grease')"/></div>
+      <div class="items-list" id="list-grease"></div>
+    </div>
+    <div class="page" id="page-txlog">
+      <div class="txlog-filter">
+        <button class="filter-btn active" id="filter-all" onclick="setTxFilter('all')">All</button>
+        <button class="filter-btn add-f" id="filter-add" onclick="setTxFilter('add')">➕ Received</button>
+        <button class="filter-btn ded-f" id="filter-deduct" onclick="setTxFilter('deduct')">➖ Used</button>
+        <button class="filter-btn" id="filter-lube" onclick="setTxFilter('lube')">🛢</button>
+        <button class="filter-btn" id="filter-chem" onclick="setTxFilter('chem')">⚗️</button>
+        <button class="filter-btn" id="filter-grease" onclick="setTxFilter('grease')">🟣</button>
+      </div>
+      <div id="tx-list"></div>
+    </div>
+    <div class="page" id="page-history"><div id="history-content"></div></div>
+    <div class="page" id="page-settings">
+      <div class="settings-section">
+        <div class="settings-title">☁️ Cloud Sync</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div><div class="settings-row-label">Firebase Status</div><div class="settings-row-sub" id="settingsSyncStatus">Not configured</div></div>
+            <button class="btn btn-cloud" style="flex:none;padding:8px 14px;font-size:12px;" onclick="openCloudSetup()">☁️ Setup</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">Vessel Information</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div><div class="settings-row-label">Vessel Name</div><div class="settings-row-sub">Appears on PDF reports</div></div>
+            <input type="text" id="settingVessel" placeholder="Enter vessel name" oninput="saveSettings()"/>
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-row-label">Prepared By</div><div class="settings-row-sub">Your name / rank</div></div>
+            <input type="text" id="settingPrepBy" placeholder="Name / Rank" oninput="saveSettings()"/>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">Delete PIN</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div><div class="settings-row-label">4-Digit PIN</div><div class="settings-row-sub" id="pinStatus">No PIN set</div></div>
+            <button class="btn btn-secondary" style="flex:none;padding:8px 14px;font-size:12px;" onclick="openSetPinModal()">🔒 Set PIN</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">Monthly Snapshot</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div><div class="settings-row-label">Save Monthly Snapshot</div><div class="settings-row-sub">Captures stock for history tracking</div></div>
+            <button class="btn btn-primary" style="flex:none;padding:8px 16px;font-size:13px;" onclick="saveSnapshot()">📸 Snapshot</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">Data Backup</div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div><div class="settings-row-label">Export JSON Backup</div><div class="settings-row-sub">Download all data as file</div></div>
+            <button class="btn btn-secondary" style="flex:none;padding:8px 16px;font-size:13px;" onclick="exportJSON()">💾 Export</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">App Info</div>
+        <div class="settings-card">
+          <div class="settings-row"><div class="settings-row-label">MarineStock Cloud</div><div style="font-size:11px;color:var(--text2);">Firebase Sync</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<button id="fab" onclick="openAddModal()">+</button>
+
+<!-- ADD/EDIT ITEM -->
+<div class="modal-bg" id="itemModal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title" id="modalTitle">Add Item</div>
+    <input type="hidden" id="editId"/>
+    <div class="form-group">
+      <label class="form-label">Category</label>
+      <div class="type-toggle">
+        <div class="type-btn active lube" id="typeLube" onclick="setType('lube')">🛢 Lube</div>
+        <div class="type-btn chem" id="typeChem" onclick="setType('chem')">⚗️ Chem</div>
+        <div class="type-btn grease" id="typeGrease" onclick="setType('grease')">🟣 Grease</div>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Item Name</label><input type="text" class="form-input" id="fieldName" placeholder="e.g. Shell Omala S2 GX 220"/></div>
+    <div class="form-group"><label class="form-label">Location / Storage Area</label><input type="text" class="form-input" id="fieldLocation" placeholder="e.g. Store Room A, E/R Locker"/></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Quantity</label><input type="number" class="form-input" id="fieldQty" placeholder="0" min="0" step="0.1"/></div>
+      <div class="form-group">
+        <label class="form-label">Unit</label>
+        <select class="form-input" id="fieldUnit">
+          <option>L</option><option>kg</option><option>g</option><option>pcs</option>
+          <option>drums</option><option>cans</option><option>bottles</option>
+          <option>boxes</option><option>cartridge</option><option>pails</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Minimum Stock Level</label><input type="number" class="form-input" id="fieldMin" placeholder="0" min="0" step="0.1"/></div>
+    <div class="form-group"><label class="form-label">Remarks (optional)</label><input type="text" class="form-input" id="fieldRemarks" placeholder="e.g. For ME main bearings"/></div>
+    <div id="smallOilRow" class="checkbox-row" onclick="toggleSmallOil()">
+      <input type="checkbox" id="fieldSmallOil" onclick="event.stopPropagation();toggleSmallOil()"/>
+      <label for="fieldSmallOil">Include in <strong>Small Oils</strong> total (Engine Room Logbook)</label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('itemModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveItem()">Save Item</button>
+    </div>
+  </div>
+</div>
+
+<!-- TRANSACTION MODAL -->
+<div class="modal-bg" id="txModal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title" id="txModalTitle">Update Quantity</div>
+    <input type="hidden" id="txItemId"/>
+    <div class="tx-type-row">
+      <div class="tx-type-btn active add" id="txTypeAdd" onclick="setTxType('add')">➕ RECEIVED</div>
+      <div class="tx-type-btn deduct" id="txTypeDed" onclick="setTxType('deduct')">➖ USED</div>
+    </div>
+    <div class="form-group"><label class="form-label">Date of Transaction</label><input type="date" class="form-input" id="txDate"/></div>
+    <div class="form-group">
+      <label class="form-label">Quantity</label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="number" class="form-input" id="txQty" placeholder="0" min="0.1" step="0.1" style="flex:1;" oninput="updateTxPreviewLive()"/>
+        <span id="txUnit" style="color:var(--text2);font-size:14px;min-width:30px;"></span>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Remarks <span style="color:var(--danger);">*</span></label><input type="text" class="form-input" id="txRemarks" placeholder="e.g. PO received, Used for ME #1 bearings..."/></div>
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--text2);">
+      Current: <span id="txCurrQty" style="color:var(--text);font-weight:600;"></span> → After: <span id="txAfterQty" style="font-weight:700;"></span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('txModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveTx()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIN VERIFY -->
+<div class="modal-bg center" id="pinModal">
+  <div class="modal centered">
+    <div class="modal-title" style="text-align:center;margin-bottom:4px;">🔒 PIN Required</div>
+    <div class="pin-subtitle">Enter PIN to delete:</div>
+    <div class="pin-item-name" id="pinItemName"></div>
+    <div class="pin-display"><div class="pin-dot" id="pd0"></div><div class="pin-dot" id="pd1"></div><div class="pin-dot" id="pd2"></div><div class="pin-dot" id="pd3"></div></div>
+    <div class="pin-keypad">
+      <div class="pin-key" onclick="pinKey('1')">1</div><div class="pin-key" onclick="pinKey('2')">2</div><div class="pin-key" onclick="pinKey('3')">3</div>
+      <div class="pin-key" onclick="pinKey('4')">4</div><div class="pin-key" onclick="pinKey('5')">5</div><div class="pin-key" onclick="pinKey('6')">6</div>
+      <div class="pin-key" onclick="pinKey('7')">7</div><div class="pin-key" onclick="pinKey('8')">8</div><div class="pin-key" onclick="pinKey('9')">9</div>
+      <div class="pin-key empty"></div><div class="pin-key" onclick="pinKey('0')">0</div><div class="pin-key del" onclick="pinBackspace()">⌫</div>
+    </div>
+    <div class="modal-actions" style="margin-top:16px;"><button class="btn btn-secondary" onclick="closeModal('pinModal')">Cancel</button></div>
+  </div>
+</div>
+
+<!-- SET PIN -->
+<div class="modal-bg center" id="setPinModal">
+  <div class="modal centered">
+    <div class="modal-title" style="text-align:center;margin-bottom:4px;">Set Delete PIN</div>
+    <div class="pin-subtitle" id="setPinSubtitle">Enter a new 4-digit PIN</div>
+    <div style="height:8px;"></div>
+    <div class="pin-display"><div class="pin-dot" id="spd0"></div><div class="pin-dot" id="spd1"></div><div class="pin-dot" id="spd2"></div><div class="pin-dot" id="spd3"></div></div>
+    <div class="pin-keypad">
+      <div class="pin-key" onclick="setPinKey('1')">1</div><div class="pin-key" onclick="setPinKey('2')">2</div><div class="pin-key" onclick="setPinKey('3')">3</div>
+      <div class="pin-key" onclick="setPinKey('4')">4</div><div class="pin-key" onclick="setPinKey('5')">5</div><div class="pin-key" onclick="setPinKey('6')">6</div>
+      <div class="pin-key" onclick="setPinKey('7')">7</div><div class="pin-key" onclick="setPinKey('8')">8</div><div class="pin-key" onclick="setPinKey('9')">9</div>
+      <div class="pin-key empty"></div><div class="pin-key" onclick="setPinKey('0')">0</div><div class="pin-key del" onclick="setPinBackspace()">⌫</div>
+    </div>
+    <div class="modal-actions" style="margin-top:16px;">
+      <button class="btn btn-secondary" onclick="closeModal('setPinModal')">Cancel</button>
+      <button class="btn btn-danger-full" id="clearPinBtn" onclick="clearPin()" style="display:none;">🗑 Remove PIN</button>
+    </div>
+  </div>
+</div>
+
+<!-- CLOUD SETUP MODAL -->
+<div class="modal-bg" id="cloudModal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title">☁️ Cloud Setup Guide</div>
+    <div class="setup-step">
+      <div class="setup-step-num">Step 1</div>
+      <div class="setup-step-title">Create a Google Account</div>
+      <div class="setup-step-desc">Go to <a href="https://accounts.google.com/signup" target="_blank">accounts.google.com/signup</a> and create a free Google account if you don't have one.</div>
+    </div>
+    <div class="setup-step">
+      <div class="setup-step-num">Step 2</div>
+      <div class="setup-step-title">Create a Firebase Project</div>
+      <div class="setup-step-desc">
+        1. Go to <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a><br/>
+        2. Click <strong>"Add project"</strong> → Name it <em>marinestock</em><br/>
+        3. Disable Google Analytics (not needed) → Click <strong>"Create project"</strong>
+      </div>
+    </div>
+    <div class="setup-step">
+      <div class="setup-step-num">Step 3</div>
+      <div class="setup-step-title">Add a Web App &amp; Get Config</div>
+      <div class="setup-step-desc">
+        1. In your project, click the <strong>&lt;/&gt;</strong> (Web) icon<br/>
+        2. Register app name: <em>marinestock-app</em> → Click <strong>"Register app"</strong><br/>
+        3. You'll see a <code>firebaseConfig</code> block — copy the whole JSON object
+      </div>
+    </div>
+    <div class="setup-step">
+      <div class="setup-step-num">Step 4</div>
+      <div class="setup-step-title">Set Up Firestore Database</div>
+      <div class="setup-step-desc">
+        1. In Firebase sidebar: <strong>Build → Firestore Database</strong><br/>
+        2. Click <strong>"Create database"</strong><br/>
+        3. Choose <strong>"Start in test mode"</strong> → Select any location → Click <strong>"Enable"</strong>
+      </div>
+    </div>
+    <div class="setup-step">
+      <div class="setup-step-num">Step 5</div>
+      <div class="setup-step-title">Paste Your Config Below</div>
+      <div class="setup-step-desc" style="margin-bottom:8px;">Paste only the values inside the curly braces <code>{ ... }</code></div>
+      <textarea class="config-textarea" id="configInput" placeholder='{
+  "apiKey": "AIzaSy...",
+  "authDomain": "your-project.firebaseapp.com",
+  "projectId": "your-project-id",
+  "storageBucket": "your-project.appspot.com",
+  "messagingSenderId": "123456789",
+  "appId": "1:123...:web:abc..."
+}'></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('cloudModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="applyFirebaseConfig()">☁️ Connect to Cloud</button>
+    </div>
+  </div>
+</div>
+
+<!-- EXPORT MODAL -->
+<div class="modal-bg" id="exportModal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title">📄 Export PDF Report</div>
+    <div class="form-group">
+      <label class="form-label">Report Type</label>
+      <select class="form-input" id="exportType" onchange="updateExportSections()">
+        <option value="simple">Simple Table List</option>
+        <option value="monthly">Monthly Report (with signature)</option>
+        <option value="comparison">Month-to-Month Comparison</option>
+        <option value="txlog">Transaction Log</option>
+      </select>
+    </div>
+    <div id="exportSectionsWrap">
+      <label class="form-label">Include Sections</label>
+      <div class="export-check-grid">
+        <label class="export-check-row"><input type="checkbox" id="expLube" checked/><span class="export-check-icon">🛢</span><div><div class="export-check-label">Lube Oil</div><div class="export-check-sub" id="expLubeSub"></div></div></label>
+        <label class="export-check-row"><input type="checkbox" id="expChem" checked/><span class="export-check-icon">⚗️</span><div><div class="export-check-label">Chemicals</div><div class="export-check-sub" id="expChemSub"></div></div></label>
+        <label class="export-check-row"><input type="checkbox" id="expGrease" checked/><span class="export-check-icon">🟣</span><div><div class="export-check-label">Grease</div><div class="export-check-sub" id="expGreaseSub"></div></div></label>
+        <label class="export-check-row" id="expSmallOilRow"><input type="checkbox" id="expSmallOil" checked/><span class="export-check-icon">📊</span><div><div class="export-check-label">Small Oils Summary</div><div class="export-check-sub" id="expSmallOilSub"></div></div></label>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('exportModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="runExport()">📥 Export PDF</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── STATE ─────────────────────────────────────────────────────────────
+let db={items:[],transactions:[],history:[],settings:{vessel:'',prepBy:'',pin:''}};
+let currentTab='lube',editingId=null,selectedType='lube';
+let txType='add',txFilter='all';
+let pinBuffer='',pinPendingDeleteId=null;
+let setPinBuffer='',setPinStep=1,setPinFirst='';
+
+// ── INIT ──────────────────────────────────────────────────────────────
+function init(){
+  // Load local settings (pin, vessel name) from localStorage as fallback
+  const ls=localStorage.getItem('marinestock_cloud_settings');
+  if(ls){ try{ const s=JSON.parse(ls); db.settings={...db.settings,...s}; }catch(e){} }
+  applySettings();
+  renderItems('lube');renderItems('chem');renderItems('grease');
+  renderTxLog();renderHistory();updateSmallOilsBanner();updateExportSections();
+}
+
+// ── SYNC STATUS ───────────────────────────────────────────────────────
+function updateSyncStatus(status){
+  const badge=document.getElementById('syncBadge');
+  const text=document.getElementById('syncText');
+  const sub=document.getElementById('settingsSyncStatus');
+  badge.className='sync-badge '+status;
+  const dot=badge.querySelector('.sync-dot');
+  dot.className='sync-dot'+(status==='connecting'?' pulse':'');
+  const labels={connected:'☁️ Synced — All devices up to date',connecting:'Connecting to cloud...',
+    'not-configured':'Not Connected — Tap to Setup','error':'Sync Error — Tap to Reconfigure'};
+  text.textContent=labels[status]||status;
+  if(sub) sub.textContent=labels[status]||status;
+  badge.onclick=(['not-configured','error'].includes(status))?openCloudSetup:null;
+}
+
+// ── CLOUD SETUP ───────────────────────────────────────────────────────
+function openCloudSetup(){
+  // Pre-fill if config already saved
+  const saved=localStorage.getItem('marinestock_fb_config');
+  if(saved){ try{ document.getElementById('configInput').value=saved; }catch(e){} }
+  document.getElementById('cloudModal').classList.add('open');
+}
+
+function applyFirebaseConfig(){
+  const raw=document.getElementById('configInput').value.trim();
+  if(!raw){ toast('⚠️ Please paste your Firebase config'); return; }
+  let cfg;
+  try{
+    // Accept with or without outer braces
+    const clean=raw.startsWith('{')?raw:'{'+raw+'}';
+    cfg=JSON.parse(clean);
+  }catch(e){
+    toast('⚠️ Invalid JSON. Check your config format.');return;
+  }
+  if(!cfg.apiKey||!cfg.projectId){toast('⚠️ Config missing apiKey or projectId');return;}
+
+  // Save config to localStorage
+  localStorage.setItem('marinestock_fb_config',JSON.stringify(cfg,null,2));
+
+  // Inject config into the module and reinitialize
+  // We reload the page with the config stored so the module picks it up
+  toast('☁️ Config saved! Connecting...');
+  closeModal('cloudModal');
+
+  // Reload so the module script picks up the new config
+  setTimeout(()=>location.reload(),1000);
+}
+
+// On load, check if we have a saved config and auto-inject
+(function injectSavedConfig(){
+  const saved=localStorage.getItem('marinestock_fb_config');
+  if(!saved) return;
+  // The config is injected by overriding FIREBASE_CONFIG via a dynamic script
+  try{
+    const cfg=JSON.parse(saved);
+    // Patch the module's config at runtime via a trick: store in window for module to read
+    window.__FIREBASE_CFG__=cfg;
+  }catch(e){}
+})();
+
+// ── SETTINGS ─────────────────────────────────────────────────────────
+function applySettings(){
+  document.getElementById('headerVessel').textContent=db.settings.vessel||'— Vessel —';
+  document.getElementById('settingVessel').value=db.settings.vessel||'';
+  document.getElementById('settingPrepBy').value=db.settings.prepBy||'';
+  document.getElementById('pinStatus').textContent=db.settings.pin?'PIN is set — delete protected':'No PIN set';
+  const cb=document.getElementById('clearPinBtn');
+  if(cb) cb.style.display=db.settings.pin?'flex':'none';
+}
+function saveSettings(){
+  db.settings.vessel=document.getElementById('settingVessel').value;
+  db.settings.prepBy=document.getElementById('settingPrepBy').value;
+  // Save settings locally AND to cloud
+  localStorage.setItem('marinestock_cloud_settings',JSON.stringify(db.settings));
+  if(window._isFirebaseReady&&window._isFirebaseReady()) window._cloudSaveSettings(db.settings);
+}
+
+// ── TABS ──────────────────────────────────────────────────────────────
+function showTab(tab){
+  currentTab=tab;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active','lube','chem','grease','txlog','hist'));
+  const el=document.getElementById('tab-'+tab);
+  if(el){el.classList.add('active');if(['lube','chem','grease'].includes(tab))el.classList.add(tab);else if(tab==='txlog')el.classList.add('txlog');else if(tab==='history')el.classList.add('hist');}
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+tab).classList.add('active');
+  document.getElementById('fab').style.display=['txlog','history','settings'].includes(tab)?'none':'flex';
+}
+
+// ── SMALL OILS ────────────────────────────────────────────────────────
+function updateSmallOilsBanner(){
+  const so=db.items.filter(i=>i.type==='lube'&&i.smallOil);
+  const total=so.reduce((s,i)=>s+parseFloat(i.qty||0),0);
+  document.getElementById('small-oils-total').textContent=`${formatQty(total)} L`;
+  document.getElementById('small-oils-count').textContent=`${so.length} item${so.length!==1?'s':''}`;
+}
+
+// ── RENDER ITEMS ──────────────────────────────────────────────────────
+function renderItems(type){
+  const search=(document.getElementById('search-'+type)||{}).value?.toLowerCase()||'';
+  const items=db.items.filter(i=>i.type===type&&(!search||i.name.toLowerCase().includes(search)||(i.location||'').toLowerCase().includes(search)));
+  const all=db.items.filter(i=>i.type===type);
+  const low=all.filter(i=>parseFloat(i.qty)<=parseFloat(i.min)&&parseFloat(i.min)>0);
+  document.getElementById('stats-'+type).innerHTML=`
+    <div class="stat-card"><div class="stat-val">${all.length}</div><div class="stat-label">Total</div></div>
+    <div class="stat-card"><div class="stat-val low">${low.length}</div><div class="stat-label">Low Stock</div></div>
+    <div class="stat-card"><div class="stat-val">${all.filter(i=>parseFloat(i.qty)>0).length}</div><div class="stat-label">In Stock</div></div>`;
+  const list=document.getElementById('list-'+type);
+  if(!items.length){list.innerHTML=`<div class="empty-state"><div class="empty-icon">${type==='lube'?'🛢':type==='chem'?'⚗️':'🟣'}</div><div class="empty-text">${search?'No results found.':window._isFirebaseReady&&window._isFirebaseReady()?'No items yet. Tap + to add one.':'No items yet.<br/>Connect to cloud first (⚙️ Settings → ☁️ Setup)'}</div></div>`;if(type==='lube')updateSmallOilsBanner();return;}
+  items.sort((a,b)=>{const aL=parseFloat(a.qty)<=parseFloat(a.min)&&parseFloat(a.min)>0,bL=parseFloat(b.qty)<=parseFloat(b.min)&&parseFloat(b.min)>0;if(aL!==bL)return aL?-1:1;return a.name.localeCompare(b.name);});
+  list.innerHTML=items.map(i=>{
+    const qty=parseFloat(i.qty)||0,mn=parseFloat(i.min)||0;
+    const pct=mn>0?Math.min(100,Math.round((qty/(mn*2))*100)):50;
+    const isLow=qty<=mn&&mn>0;
+    const barColor=isLow?'var(--danger)':(pct<60?'var(--accent)':'var(--safe)');
+    return `<div class="item-card ${type} ${isLow?'low-stock':''}">
+      <div class="item-top">
+        <div class="item-name-wrap"><span class="item-name">${i.name}</span>${i.smallOil?'<span class="small-oil-badge">📊 SMALL OIL</span>':''}</div>
+        <div class="item-actions">
+          <div class="btn-icon" onclick="openTxModal('${i.id}')">⚖️</div>
+          <div class="btn-icon" onclick="openEditModal('${i.id}')">✏️</div>
+          <div class="btn-icon danger" onclick="requestDelete('${i.id}')">🗑</div>
+        </div>
+      </div>
+      <div class="item-meta"><span class="tag location">📍 ${i.location||'No location'}</span>${i.remarks?`<span class="tag">💬 ${i.remarks}</span>`:''}</div>
+      <div class="item-qty-row">
+        <div>
+          <div class="qty-display"><span class="qty-num">${formatQty(qty)}</span><span class="qty-unit">${i.unit}</span></div>
+          <div class="qty-min ${isLow?'warn':''}">Min: ${formatQty(mn)} ${i.unit}${isLow?' ⚠️ LOW':''}</div>
+          <div class="qty-bar-wrap"><div class="qty-bar" style="width:${pct}%;background:${barColor}"></div></div>
+        </div>
+        <div class="qty-controls">
+          <div class="qty-btn add-btn" onclick="quickTx('${i.id}','add')">➕ ADD</div>
+          <div class="qty-btn ded-btn" onclick="quickTx('${i.id}','deduct')">➖ USE</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  if(type==='lube')updateSmallOilsBanner();
+}
+
+// ── DELETE WITH PIN ───────────────────────────────────────────────────
+function requestDelete(id){
+  const item=db.items.find(i=>i.id===id);if(!item)return;
+  if(!db.settings.pin){if(!confirm(`Delete "${item.name}"?`))return;doDelete(id);return;}
+  pinPendingDeleteId=id;pinBuffer='';updatePinDots();
+  document.getElementById('pinItemName').textContent=`"${item.name}"`;
+  document.getElementById('pinModal').classList.add('open');
+}
+function pinKey(k){
+  if(pinBuffer.length>=4)return;pinBuffer+=k;updatePinDots();
+  if(pinBuffer.length===4){setTimeout(()=>{
+    if(pinBuffer===db.settings.pin){closeModal('pinModal');doDelete(pinPendingDeleteId);pinBuffer='';}
+    else{[0,1,2,3].forEach(i=>document.getElementById('pd'+i).classList.add('error'));setTimeout(()=>{pinBuffer='';updatePinDots();[0,1,2,3].forEach(i=>document.getElementById('pd'+i).classList.remove('error'));},700);toast('❌ Incorrect PIN');}
+  },100);}
+}
+function pinBackspace(){if(pinBuffer.length>0){pinBuffer=pinBuffer.slice(0,-1);updatePinDots();}}
+function updatePinDots(){[0,1,2,3].forEach(i=>{document.getElementById('pd'+i).classList.toggle('filled',i<pinBuffer.length);});}
+function doDelete(id){
+  const item=db.items.find(i=>i.id===id);if(!item)return;
+  db.items=db.items.filter(i=>i.id!==id);
+  if(window._cloudDeleteItem) window._cloudDeleteItem(id);
+  // If firebase is syncing, the onSnapshot will re-render; otherwise render locally
+  if(!(window._isFirebaseReady&&window._isFirebaseReady())) renderItems(item.type);
+  toast('🗑 Item deleted');
+}
+
+// ── SET PIN ───────────────────────────────────────────────────────────
+function openSetPinModal(){setPinBuffer='';setPinStep=1;setPinFirst='';document.getElementById('setPinSubtitle').textContent='Enter a new 4-digit PIN';document.getElementById('clearPinBtn').style.display=db.settings.pin?'flex':'none';updateSetPinDots();document.getElementById('setPinModal').classList.add('open');}
+function setPinKey(k){
+  if(setPinBuffer.length>=4)return;setPinBuffer+=k;updateSetPinDots();
+  if(setPinBuffer.length===4){setTimeout(()=>{
+    if(setPinStep===1){setPinFirst=setPinBuffer;setPinBuffer='';setPinStep=2;document.getElementById('setPinSubtitle').textContent='Confirm your PIN';updateSetPinDots();}
+    else{if(setPinBuffer===setPinFirst){db.settings.pin=setPinBuffer;saveSettings();closeModal('setPinModal');toast('🔒 PIN saved!');}
+    else{[0,1,2,3].forEach(i=>document.getElementById('spd'+i).classList.add('error'));setTimeout(()=>{setPinBuffer='';setPinStep=1;setPinFirst='';document.getElementById('setPinSubtitle').textContent='PINs did not match. Try again.';updateSetPinDots();[0,1,2,3].forEach(i=>document.getElementById('spd'+i).classList.remove('error'));},700);}}
+  },100);}
+}
+function setPinBackspace(){if(setPinBuffer.length>0){setPinBuffer=setPinBuffer.slice(0,-1);updateSetPinDots();}}
+function updateSetPinDots(){[0,1,2,3].forEach(i=>{document.getElementById('spd'+i).classList.toggle('filled',i<setPinBuffer.length);});}
+function clearPin(){if(!confirm('Remove PIN?'))return;db.settings.pin='';saveSettings();closeModal('setPinModal');applySettings();toast('🔓 PIN removed');}
+
+// ── TX MODAL ──────────────────────────────────────────────────────────
+function quickTx(id,type){openTxModal(id);setTxType(type);}
+function openTxModal(id){
+  const item=db.items.find(i=>i.id===id);if(!item)return;
+  document.getElementById('txItemId').value=id;
+  document.getElementById('txModalTitle').textContent=item.name;
+  document.getElementById('txUnit').textContent=item.unit;
+  document.getElementById('txQty').value='';
+  document.getElementById('txRemarks').value='';
+  document.getElementById('txDate').value=new Date().toISOString().slice(0,10);
+  updateTxPreviewLive();setTxType('add');
+  document.getElementById('txModal').classList.add('open');
+}
+function updateTxPreviewLive(){
+  const id=document.getElementById('txItemId').value;
+  const item=db.items.find(i=>i.id===id);if(!item)return;
+  const curr=parseFloat(item.qty)||0,delta=parseFloat(document.getElementById('txQty').value)||0;
+  const after=txType==='add'?curr+delta:Math.max(0,curr-delta);
+  document.getElementById('txCurrQty').textContent=`${formatQty(curr)} ${item.unit}`;
+  const el=document.getElementById('txAfterQty');el.textContent=`${formatQty(after)} ${item.unit}`;el.style.color=txType==='add'?'var(--safe)':'var(--danger)';
+}
+function setTxType(type){
+  txType=type;
+  document.getElementById('txTypeAdd').classList.toggle('active',type==='add');document.getElementById('txTypeAdd').classList.toggle('add',type==='add');
+  document.getElementById('txTypeDed').classList.toggle('active',type==='deduct');document.getElementById('txTypeDed').classList.toggle('deduct',type==='deduct');
+  updateTxPreviewLive();
+}
+function saveTx(){
+  const id=document.getElementById('txItemId').value;
+  const item=db.items.find(i=>i.id===id);if(!item)return;
+  const qty=parseFloat(document.getElementById('txQty').value);
+  const remarks=document.getElementById('txRemarks').value.trim();
+  const txDateVal=document.getElementById('txDate').value;
+  if(!qty||qty<=0){toast('⚠️ Enter a valid quantity');return;}
+  if(!remarks){toast('⚠️ Please enter remarks');return;}
+  if(!txDateVal){toast('⚠️ Select a date');return;}
+  const before=parseFloat(item.qty)||0;
+  const after=txType==='add'?before+qty:Math.max(0,before-qty);
+  const chosenDate=new Date(txDateVal+'T'+new Date().toTimeString().slice(0,8));
+  const tx={id:Date.now().toString(),itemId:id,itemName:item.name,itemType:item.type,unit:item.unit,txType,qty,before,after,remarks,date:chosenDate.toISOString()};
+  db.transactions.unshift(tx);
+  item.qty=after;
+  if(window._cloudSaveTx) window._cloudSaveTx(tx);
+  else{renderItems(item.type);renderTxLog();}
+  closeModal('txModal');
+  toast(txType==='add'?`✅ Added ${formatQty(qty)} ${item.unit}`:`✅ Deducted ${formatQty(qty)} ${item.unit}`);
+}
+
+// ── TX LOG ────────────────────────────────────────────────────────────
+function setTxFilter(f){txFilter=f;document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));document.getElementById('filter-'+f).classList.add('active');renderTxLog();}
+function renderTxLog(){
+  const list=document.getElementById('tx-list');
+  let txs=[...db.transactions];
+  if(txFilter==='add')txs=txs.filter(t=>t.txType==='add');
+  else if(txFilter==='deduct')txs=txs.filter(t=>t.txType==='deduct');
+  else if(['lube','chem','grease'].includes(txFilter))txs=txs.filter(t=>t.itemType===txFilter);
+  if(!txs.length){list.innerHTML=`<div class="empty-state"><div class="empty-icon">📋</div><div class="empty-text">No transactions yet.</div></div>`;return;}
+  list.innerHTML=txs.map(t=>{
+    const d=new Date(t.date),ds=d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}),ts=d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+    const cc=t.itemType==='lube'?'var(--lube)':t.itemType==='chem'?'var(--chem)':'var(--grease)';
+    return `<div class="tx-entry"><div class="tx-icon ${t.txType}">${t.txType==='add'?'➕':'➖'}</div><div class="tx-body"><div class="tx-name">${t.itemName}</div><div class="tx-remarks">${t.remarks}</div><div class="tx-meta"><span style="color:${cc};font-size:10px;">${(t.itemType||'').toUpperCase()}</span> · ${t.txType==='add'?'Received':'Used'} · ${ds} ${ts}</div></div><div class="tx-right"><div class="tx-qty ${t.txType}">${t.txType==='add'?'+':'−'}${formatQty(t.qty)} ${t.unit}</div><div class="tx-after">After: ${formatQty(t.after)} ${t.unit}</div></div></div>`;
+  }).join('');
+}
+
+// ── ITEM MODAL ────────────────────────────────────────────────────────
+function openAddModal(){
+  if(!(window._isFirebaseReady&&window._isFirebaseReady())){toast('⚠️ Connect to cloud first (Settings → ☁️ Setup)');return;}
+  editingId=null;document.getElementById('modalTitle').textContent='Add Item';document.getElementById('editId').value='';
+  ['fieldName','fieldLocation','fieldRemarks'].forEach(f=>document.getElementById(f).value='');
+  document.getElementById('fieldQty').value='';document.getElementById('fieldUnit').value='L';document.getElementById('fieldMin').value='';document.getElementById('fieldSmallOil').checked=false;
+  setType(['lube','chem','grease'].includes(currentTab)?currentTab:'lube');
+  document.getElementById('itemModal').classList.add('open');
+}
+function openEditModal(id){
+  const item=db.items.find(i=>i.id===id);if(!item)return;
+  editingId=id;document.getElementById('modalTitle').textContent='Edit Item';document.getElementById('editId').value=id;
+  document.getElementById('fieldName').value=item.name;document.getElementById('fieldLocation').value=item.location||'';
+  document.getElementById('fieldQty').value=item.qty;document.getElementById('fieldUnit').value=item.unit;
+  document.getElementById('fieldMin').value=item.min;document.getElementById('fieldRemarks').value=item.remarks||'';
+  document.getElementById('fieldSmallOil').checked=!!item.smallOil;setType(item.type);
+  document.getElementById('itemModal').classList.add('open');
+}
+function setType(type){
+  selectedType=type;
+  ['lube','chem','grease'].forEach(t=>{const el=document.getElementById('type'+t.charAt(0).toUpperCase()+t.slice(1));el.classList.toggle('active',t===type);el.classList.toggle(t,t===type);});
+  document.getElementById('smallOilRow').style.display=type==='lube'?'flex':'none';
+  if(type==='grease'&&!editingId)document.getElementById('fieldUnit').value='kg';
+}
+function toggleSmallOil(){const cb=document.getElementById('fieldSmallOil');cb.checked=!cb.checked;}
+function saveItem(){
+  const name=document.getElementById('fieldName').value.trim();if(!name){toast('⚠️ Item name required');return;}
+  const qty=parseFloat(document.getElementById('fieldQty').value)||0;
+  const min=parseFloat(document.getElementById('fieldMin').value)||0;
+  const unit=document.getElementById('fieldUnit').value;
+  const location=document.getElementById('fieldLocation').value.trim();
+  const remarks=document.getElementById('fieldRemarks').value.trim();
+  const smallOil=selectedType==='lube'?document.getElementById('fieldSmallOil').checked:false;
+  const item={name,qty,unit,min,location,remarks,type:selectedType,smallOil,updated:new Date().toISOString()};
+  if(editingId){item.id=editingId;const idx=db.items.findIndex(i=>i.id===editingId);if(idx>=0)db.items[idx]={...db.items[idx],...item};}
+  else{item.id=Date.now().toString();item.created=new Date().toISOString();db.items.push(item);}
+  if(window._cloudSaveItem) window._cloudSaveItem(item);
+  else renderItems(selectedType);
+  closeModal('itemModal');toast(editingId?'✅ Item updated':'✅ Item added');
+}
+
+// ── SNAPSHOT / HISTORY ────────────────────────────────────────────────
+function saveSnapshot(){
+  const now=new Date(),key=`${now.getFullYear()}-${now.getMonth()+1}`,label=now.toLocaleString('default',{month:'long',year:'numeric'});
+  db.history=db.history.filter(h=>h.key!==key);
+  const snap={key,label,date:now.toISOString(),items:db.items.map(i=>({id:i.id,name:i.name,qty:i.qty,unit:i.unit,type:i.type,location:i.location,smallOil:!!i.smallOil}))};
+  db.history.unshift(snap);
+  if(window._cloudSaveSnapshot) window._cloudSaveSnapshot(snap);
+  else renderHistory();
+  toast(`📸 Snapshot saved for ${label}`);
+}
+function renderHistory(){
+  const el=document.getElementById('history-content');
+  if(!db.history.length){el.innerHTML=`<div class="empty-state"><div class="empty-icon">📊</div><div class="empty-text">No snapshots yet.<br>Go to Settings → Save a Snapshot.</div></div>`;return;}
+  el.innerHTML=db.history.map((snap,idx)=>{
+    const prev=db.history[idx+1];
+    const rows=snap.items.map(si=>{
+      const pi=prev?prev.items.find(p=>p.id===si.id):null;
+      let diff='—';if(pi!=null){const delta=parseFloat(si.qty)-parseFloat(pi.qty);diff=`<span class="${delta>=0?'ch-pos':'ch-neg'}">${delta>=0?'+':''}${formatQty(delta)}</span>`;}
+      const cc=si.type==='lube'?'var(--lube)':si.type==='chem'?'var(--chem)':'var(--grease)';
+      return `<tr><td>${si.name}${si.smallOil?'<span class="small-oil-badge" style="margin-left:4px;">SO</span>':''}</td><td><span style="color:${cc};font-size:10px;">${(si.type||'').toUpperCase()}</span></td><td>${si.location||'—'}</td><td>${formatQty(si.qty)} ${si.unit}</td><td>${diff}</td></tr>`;
+    }).join('');
+    return `<div class="history-month"><div class="month-header">📅 ${snap.label}</div><table class="history-table"><thead><tr><th>Item</th><th>Type</th><th>Location</th><th>Qty</th><th>Change</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join('');
+}
+
+// ── EXPORT ────────────────────────────────────────────────────────────
+function openExportModal(){updateExportSections();document.getElementById('exportModal').classList.add('open');}
+function updateExportSections(){
+  const mode=document.getElementById('exportType')?document.getElementById('exportType').value:'simple';
+  const show=mode==='simple'||mode==='monthly';
+  const wrap=document.getElementById('exportSectionsWrap');if(wrap)wrap.style.display=show?'block':'none';
+  const el=id=>document.getElementById(id);
+  const lc=db.items.filter(i=>i.type==='lube').length,cc=db.items.filter(i=>i.type==='chem').length,gc=db.items.filter(i=>i.type==='grease').length,sc=db.items.filter(i=>i.type==='lube'&&i.smallOil).length;
+  if(el('expLubeSub'))el('expLubeSub').textContent=`${lc} item${lc!==1?'s':''}`;
+  if(el('expChemSub'))el('expChemSub').textContent=`${cc} item${cc!==1?'s':''}`;
+  if(el('expGreaseSub'))el('expGreaseSub').textContent=`${gc} item${gc!==1?'s':''}`;
+  if(el('expSmallOilSub'))el('expSmallOilSub').textContent=`${sc} small oil item${sc!==1?'s':''}`;
+  const soRow=document.getElementById('expSmallOilRow');if(soRow)soRow.style.display=show?'flex':'none';
+}
+function runExport(){
+  const mode=document.getElementById('exportType').value;
+  const s={lube:document.getElementById('expLube').checked,chem:document.getElementById('expChem').checked,grease:document.getElementById('expGrease').checked,smallOil:document.getElementById('expSmallOil').checked};
+  if((mode==='simple'||mode==='monthly')&&!s.lube&&!s.chem&&!s.grease){toast('⚠️ Select at least one section');return;}
+  closeModal('exportModal');exportPDF(mode,s);
+}
+
+function pdfHeader(doc,title){
+  const vessel=db.settings.vessel||'Unknown Vessel',prepBy=db.settings.prepBy||'',now=new Date();
+  const dateStr=now.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+  doc.setFillColor(10,22,40);doc.rect(0,0,210,30,'F');
+  doc.setTextColor(232,160,32);doc.setFontSize(18);doc.setFont('helvetica','bold');doc.text('MARINESTOCK CLOUD',14,12);
+  doc.setTextColor(0,194,184);doc.setFontSize(8);doc.text('ONBOARD INVENTORY MANAGEMENT',14,18);
+  doc.setTextColor(200,220,240);doc.setFontSize(8);doc.text(`Vessel: ${vessel}`,14,24);doc.text(`Date: ${dateStr}`,100,24);
+  if(prepBy)doc.text(`Prepared by: ${prepBy}`,14,28.5);
+  doc.setTextColor(30,30,30);doc.setFontSize(13);doc.setFont('helvetica','bold');doc.text(title,14,40);
+  return{vessel,prepBy,dateStr,now,y:46};
+}
+function addPdfFooter(doc,vessel,dateStr){
+  const n=doc.internal.getNumberOfPages();
+  for(let i=1;i<=n;i++){doc.setPage(i);doc.setFontSize(7);doc.setTextColor(150,150,150);doc.text(`MarineStock Cloud — ${vessel} — ${dateStr} — Page ${i} of ${n}`,14,290);}
+}
+function exportPDF(mode,sections){
+  const{jsPDF}=window.jspdf;const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+  const margin=14,typeColors={lube:[0,130,124],chem:[160,100,0],grease:[100,60,180]};
+  const typeLabels={lube:'LUBE OIL',chem:'CHEMICALS',grease:'GREASE'};
+  const typeIcons={lube:'🛢',chem:'⚗️',grease:'🟣'};
+  if(mode==='simple'||mode==='monthly'){
+    const title=mode==='simple'?'INVENTORY LIST':`MONTHLY INVENTORY REPORT — ${new Date().toLocaleString('default',{month:'long',year:'numeric'}).toUpperCase()}`;
+    let{vessel,prepBy,dateStr,now,y}=pdfHeader(doc,title);
+    ['lube','chem','grease'].forEach(type=>{
+      if(!sections[type])return;
+      const items=db.items.filter(i=>i.type===type);if(!items.length)return;
+      if(mode==='monthly'){const low=items.filter(i=>parseFloat(i.qty)<=parseFloat(i.min)&&parseFloat(i.min)>0);doc.setFontSize(9);doc.setFont('helvetica','bold');doc.setTextColor(...typeColors[type]);doc.text(`${typeLabels[type]} — ${items.length} items, Low Stock: ${low.length}`,margin,y);y+=4;doc.setTextColor(30,30,30);}
+      const heads=mode==='simple'?[[`${typeLabels[type]}`,'Location','Qty','Unit','Min','Status']]:[['Item','Location','Qty','Unit','Min','Remarks',type==='lube'?'Small Oil':'—','Status']];
+      const body=items.map(i=>{const isLow=parseFloat(i.qty)<=parseFloat(i.min)&&parseFloat(i.min)>0;if(mode==='simple')return[i.name,i.location||'—',formatQty(i.qty),i.unit,formatQty(i.min),isLow?'LOW':'OK'];return[i.name,i.location||'—',formatQty(i.qty),i.unit,formatQty(i.min),i.remarks||'—',type==='lube'?(i.smallOil?'YES':''):'-',isLow?'⚠ LOW':'OK'];});
+      doc.autoTable({startY:y,head:heads,body,styles:{fontSize:8.5,cellPadding:3},headStyles:{fillColor:typeColors[type],textColor:255},margin:{left:margin,right:margin},didParseCell:d=>{if(d.section==='body'){const v=d.cell.raw||'';if(v==='LOW'||v==='⚠ LOW'){d.cell.styles.textColor=[200,50,50];d.cell.styles.fontStyle='bold';}}}});
+      y=doc.lastAutoTable.finalY+8;
+    });
+    if(sections.lube&&sections.smallOil){const soItems=db.items.filter(i=>i.type==='lube'&&i.smallOil);if(soItems.length){if(y>250){doc.addPage();y=20;}doc.setFontSize(11);doc.setFont('helvetica','bold');doc.setTextColor(0,130,124);doc.text('SMALL OILS SUMMARY (Engine Room Logbook)',margin,y);y+=5;doc.setTextColor(30,30,30);doc.autoTable({startY:y,head:[['Item','Location','Qty (L)']],body:soItems.map(i=>[i.name,i.location||'—',formatQty(i.qty)]),styles:{fontSize:9,cellPadding:3},headStyles:{fillColor:[0,130,124],textColor:255},foot:[[{content:'TOTAL',colSpan:2,styles:{fontStyle:'bold'}},formatQty(soItems.reduce((s,i)=>s+parseFloat(i.qty),0))+' L']],footStyles:{fillColor:[0,80,76],textColor:255,fontStyle:'bold'},margin:{left:margin,right:margin}});y=doc.lastAutoTable.finalY+8;}}
+    if(mode==='monthly'){if(y>240){doc.addPage();y=20;}y+=8;doc.setFontSize(9);doc.setFont('helvetica','normal');doc.setTextColor(80,80,80);doc.text('Prepared by:',margin,y);doc.text('Verified by:',110,y);y+=12;doc.line(margin,y,90,y);doc.line(110,y,190,y);y+=5;doc.text(prepBy||'______________________',margin,y);doc.text('______________________',110,y);}
+    addPdfFooter(doc,db.settings.vessel||'Unknown Vessel',new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}));
+    doc.save(`inventory_${mode}_${new Date().getFullYear()}${String(new Date().getMonth()+1).padStart(2,'0')}.pdf`);
+  } else if(mode==='comparison'){
+    let{vessel,dateStr,now,y}=pdfHeader(doc,'MONTH-TO-MONTH COMPARISON REPORT');
+    if(db.history.length<2){doc.setFontSize(10);doc.setFont('helvetica','normal');doc.setTextColor(30,30,30);doc.text('Need at least 2 monthly snapshots.',margin,y);}
+    else{const curr=db.history[0],prev=db.history[1];doc.setFontSize(9);doc.setFont('helvetica','normal');doc.setTextColor(60,60,60);doc.text(`Comparing: ${curr.label} vs ${prev.label}`,margin,y);y+=8;const rows=curr.items.map(ci=>{const pi=prev.items.find(p=>p.id===ci.id);const delta=pi?parseFloat(ci.qty)-parseFloat(pi.qty):null;const change=delta!==null?(delta>=0?`+${formatQty(delta)}`:formatQty(delta)):'NEW';return[ci.name,(ci.type||'').toUpperCase(),ci.location||'—',pi?formatQty(pi.qty):'—',formatQty(ci.qty),ci.unit,change];});prev.items.forEach(pi=>{if(!curr.items.find(c=>c.id===pi.id))rows.push([pi.name,(pi.type||'').toUpperCase(),pi.location||'—',formatQty(pi.qty),'—',pi.unit,'REMOVED']);});doc.autoTable({startY:y,head:[['Item','Type','Location',prev.label,curr.label,'Unit','Change']],body:rows,styles:{fontSize:8,cellPadding:3},headStyles:{fillColor:[10,22,40],textColor:255},margin:{left:margin,right:margin},didParseCell:d=>{if(d.section==='body'&&d.column.index===6){const v=d.cell.raw||'';if(v.startsWith('-'))d.cell.styles.textColor=[200,50,50];else if(v.startsWith('+'))d.cell.styles.textColor=[30,160,80];else if(v==='NEW')d.cell.styles.textColor=[0,130,124];}}});}
+    addPdfFooter(doc,db.settings.vessel||'Unknown Vessel',new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}));
+    doc.save(`inventory_comparison_${new Date().getFullYear()}${String(new Date().getMonth()+1).padStart(2,'0')}.pdf`);
+  } else if(mode==='txlog'){
+    let{vessel,dateStr,now,y}=pdfHeader(doc,'TRANSACTION LOG');
+    if(!db.transactions.length){doc.setFontSize(10);doc.setFont('helvetica','normal');doc.setTextColor(30,30,30);doc.text('No transactions recorded yet.',margin,y);}
+    else{doc.autoTable({startY:y,head:[['Date','Item','Type','Category','Qty','Unit','Before','After','Remarks']],body:db.transactions.map(t=>{const d=new Date(t.date),ds=d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})+' '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});return[ds,t.itemName,t.txType==='add'?'RECEIVED':'USED',(t.itemType||'').toUpperCase(),(t.txType==='add'?'+':'-')+formatQty(t.qty),t.unit,formatQty(t.before),formatQty(t.after),t.remarks];}),styles:{fontSize:7.5,cellPadding:2.5},headStyles:{fillColor:[10,22,40],textColor:255},margin:{left:margin,right:margin},didParseCell:d=>{if(d.section==='body'&&d.column.index===2){if(d.cell.raw==='RECEIVED')d.cell.styles.textColor=[30,160,80];else d.cell.styles.textColor=[200,50,50];}}});}
+    addPdfFooter(doc,db.settings.vessel||'Unknown Vessel',new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}));
+    doc.save(`transaction_log_${new Date().getFullYear()}${String(new Date().getMonth()+1).padStart(2,'0')}.pdf`);
+  }
+  toast('📄 PDF exported!');
+}
+
+// ── JSON BACKUP ───────────────────────────────────────────────────────
+function exportJSON(){
+  const b=new Blob([JSON.stringify(db,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download=`marinestock_cloud_backup_${new Date().toISOString().slice(0,10)}.json`;a.click();
+  toast('💾 Backup exported!');
+}
+
+// ── UTILS ─────────────────────────────────────────────────────────────
+function formatQty(n){n=parseFloat(n)||0;return n%1===0?n:n.toFixed(1);}
+function closeModal(id){document.getElementById(id).classList.remove('open');}
+function toast(msg){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2800);}
+
+['itemModal','txModal','exportModal','cloudModal'].forEach(id=>{
+  document.getElementById(id).addEventListener('click',function(e){if(e.target===this)closeModal(id);});
+});
+
+init();
+</script>
+</body>
+</html>
